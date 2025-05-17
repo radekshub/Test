@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>WebGL Waterfall</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; }
+    canvas { width: 100%; height: 100%; display: block; }
+  </style>
+</head>
+<body>
+<canvas id="glcanvas" width="512" height="512"></canvas>
+<script>
+const gl = document.getElementById("glcanvas").getContext("webgl");
+if (!gl) {
+  alert("WebGL není podporován");
+}
+
+// Vertex shader
+const vsSource = `
+attribute vec2 position;
+varying vec2 vUv;
+void main() {
+  vUv = (position + 1.0) * 0.5;
+  gl_Position = vec4(position, 0, 1);
+}
+`;
+
+// Fragment shader - posouvá data o řádek dolů a přidává nový řádek nahoře
+const fsSource = `
+precision mediump float;
+varying vec2 vUv;
+uniform sampler2D uPrevTex;
+uniform sampler2D uInputTex;
+void main() {
+  float lineHeight = 1.0 / 512.0;
+  if (vUv.y < 1.0 - lineHeight) {
+    // vezmi vzorek z předchozí textury o řádek výše
+    gl_FragColor = texture2D(uPrevTex, vec2(vUv.x, vUv.y + lineHeight));
+  } else {
+    // poslední řádek nahrad novými daty
+    gl_FragColor = texture2D(uInputTex, vec2(vUv.x, 0.0));
+  }
+}
+`;
+
+// Shader kompilace a program
+function createShader(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error("Shader compile failed:", gl.getShaderInfoLog(shader));
+    gl.deleteShader(shader);
+    return null;
+  }
+  return shader;
+}
+
+function createProgram(gl, vsSource, fsSource) {
+  const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
+  const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+  const program = gl.createProgram();
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.error("Program link failed:", gl.getProgramInfoLog(program));
+    gl.deleteProgram(program);
+    return null;
+  }
+  return program;
+}
+
+const program = createProgram(gl, vsSource, fsSource);
+gl.useProgram(program);
+
+// Setup full screen quad
+const posBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+const positions = new Float32Array([
+  -1, -1,  1, -1,  -1, 1,
+  -1,  1,  1, -1,   1, 1
+]);
+gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+
+const positionLoc = gl.getAttribLocation(program, "position");
+gl.enableVertexAttribArray(positionLoc);
+gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+
+// Vytvoření dvou textur pro ping-pong
+function createTexture() {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(
+    gl.TEXTURE_2D, 0, gl.RED, 512, 512, 0,
+    gl.RED, gl.UNSIGNED_BYTE, null
+  );
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return tex;
+}
+
+const texA = createTexture();
+const texB = createTexture();
+
+const framebuffer = gl.createFramebuffer();
+
+const inputTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, inputTex);
+gl.texImage2D(
+  gl.TEXTURE_2D, 0, gl.RED, 512, 1, 0,
+  gl.RED, gl.UNSIGNED_BYTE, null
+);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+const uPrevTexLoc = gl.getUniformLocation(program, "uPrevTex");
+const uInputTexLoc = gl.getUniformLocation(program, "uInputTex");
+
+let t = 0;
+
+function generateSignalLine() {
+  const data = new Uint8Array(512);
+  for (let i = 0; i < 512; i++) {
+    data[i] = (((i + t) % 40) < 20) ? 255 : 0;
+  }
+  t++;
+  gl.bindTexture(gl.TEXTURE_2D, inputTex);
+  gl.texSubImage2D(
+    gl.TEXTURE_2D, 0, 0, 0, 512, 1,
+    gl.RED, gl.UNSIGNED_BYTE, data
+  );
+}
+
+let frontTex = texA;
+let backTex = texB;
+
+function render() {
+  generateSignalLine();
+
+  // Render to framebuffer (back texture)
+  gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, backTex, 0);
+  gl.viewport(0, 0, 512, 512);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, frontTex);
+  gl.uniform1i(uPrevTexLoc, 0);
+
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, inputTex);
+  gl.uniform1i(uInputTexLoc, 1);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  // Swap textures
+  [frontTex, backTex] = [backTex, frontTex];
+
+  // Render to screen
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+  gl.bindTexture(gl.TEXTURE_2D, frontTex);
+  gl.uniform1i(uPrevTexLoc, 0);
+  gl.uniform1i(uInputTexLoc, 1); // inputTex není potřeba tu, ale nevadí
+
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  requestAnimationFrame(render);
+}
+
+render();
+</script>
+</body>
+</html>
